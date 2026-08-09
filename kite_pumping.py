@@ -34,7 +34,7 @@ Compares two ways to fly it:
 """
 
 import numpy as np
-from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import differential_evolution
 
 from kite_dynamics import KiteConfig, air_density, ETA_GEN, G
 from kite_optimizer import WindEnvironment
@@ -256,28 +256,18 @@ def _run_search(cfg, env, bounds, fixed_shape, l_min, l_max, elev0_deg,
         print(f"Searching for the {label} pattern "
               f"(l_min={l_min:.0f}m, l_max={l_max:.0f}m)...")
 
-    # Stage 1: differential evolution for a global search over the
-    # (possibly multimodal) shape+winch space. polish=False so the
-    # gradient refinement below is an explicit, separately-reported
-    # stage rather than a hidden step inside scipy's call.
+    # differential_evolution is a global optimizer: it evolves a whole
+    # population of candidate parameter vectors instead of climbing a
+    # gradient from one starting guess, which suits an objective built
+    # out of a physics simulation (no clean derivative to hand a
+    # gradient-based method).
     args = (cfg, env, l_min, l_max, elev0_deg, tension_cap, fixed_shape)
     res = differential_evolution(
         _objective, bounds, args=args,
         seed=seed, maxiter=maxiter, popsize=popsize,
-        mutation=(0.4, 1.2), recombination=0.7, tol=1e-7, polish=False,
+        mutation=(0.4, 1.2), recombination=0.7, tol=1e-7,
     )
-    global_kw = -res.fun / 1000.0
-
-    # Stage 2: local gradient-based refinement (finite-difference
-    # gradient, L-BFGS-B) starting from the global search's winner.
-    polish_res = minimize(_objective, res.x, args=args, method="L-BFGS-B",
-                           bounds=bounds)
-    if polish_res.fun < res.fun:
-        best_x = polish_res.x
-        polish_kw = -polish_res.fun / 1000.0
-    else:
-        best_x = res.x
-        polish_kw = global_kw
+    best_x = res.x
 
     if fixed_shape is not None:
         best_params = list(best_x) + [fixed_shape["n_weaves"],
@@ -287,8 +277,7 @@ def _run_search(cfg, env, bounds, fixed_shape, l_min, l_max, elev0_deg,
         best_params = list(best_x)
 
     if verbose:
-        print(f"Done. Global search: {global_kw:.2f} kW -> "
-              f"gradient refine: {polish_kw:.2f} kW")
+        print(f"Done. Best found: {-res.fun/1000.0:.2f} kW")
 
     best_sim = simulate_pumping_cycle(cfg, env, best_params, l_min, l_max,
                                        elev0_deg, n_cycles=report_cycles)

@@ -23,9 +23,7 @@ Library usage:
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
-from mpl_toolkits.mplot3d.art3d import Line3DCollection
-from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import differential_evolution
 
 from kite_dynamics import (
     KiteConfig, kite_forces, rk4_step, water_collection_rate, ETA_MESH,
@@ -86,14 +84,11 @@ def reference_point(s, params, elev0, l):
     Moving target point on a parametric figure-8 in azimuth/elevation
     space -- the flight-path shape the guidance law below chases.
 
-    `s` is a path-phase variable, not wall-clock time: the caller
-    advances it by how far the kite has actually traveled (scaled by
-    V_NOMINAL), not by dt directly. A target that races ahead on a
-    fixed time schedule regardless of whether the kite can keep up is
-    exactly what produced the old open-loop law's runaway drift, so
-    the target's pace here is synchronized to real progress instead --
-    it waits if the kite is flying slower than nominal, and won't ask
-    for a turn tighter than the kite can actually fly.
+    `s` is a path-phase variable, not wall-clock time: it's advanced by
+    how far the kite has actually traveled (scaled by V_NOMINAL), not
+    by dt directly. That way the target waits for the kite if it's
+    flying slower than nominal, instead of racing ahead on a fixed
+    schedule and asking for a turn tighter than the kite can fly.
 
     params = [az_amp, f, phi, elev_amp, gen_load] (only the first 4
     are used here; gen_load is read separately in simulate())
@@ -131,19 +126,15 @@ GUIDANCE_KP = 3.0   # rad bank command per rad heading error
 
 def pursuit_bank_command(pos, vel, target_pos, Kp=GUIDANCE_KP):
     """
-    Proportional-navigation-style guidance: banks toward whatever
-    heading closes the angle to a moving target point on the reference
-    figure-8, instead of a bank angle indexed blindly by wall-clock
-    time.
-
-    The old open-loop `bank(t)` law had no path back from "where the
-    kite actually is" to "what bank to fly" -- any drift from the
-    assumed trajectory (mismatched initial velocity, a gust, numerical
-    drift) just compounded, since the steering law couldn't see it.
-    That's what produced the slow-dive-to-crash failure mode a patched
-    velocity nudge was band-aiding. This closes the loop on the kite's
-    actual state instead: bank angle is a feedback response to heading
-    error, so any drift is corrected the same way it was introduced.
+    Proportional-navigation-style guidance: bank angle is a feedback
+    response to heading error, not a schedule indexed by wall-clock
+    time. The kite banks toward whatever heading closes the angle to a
+    moving target point on the reference figure-8 -- so if it ever
+    drifts off the intended path (a gust, a slightly-off starting
+    velocity), the error just shows up as a bigger heading error and
+    gets steered out, the same way a driver corrects for wind by
+    watching the road instead of following a pre-planned steering
+    sequence.
     """
     l = np.linalg.norm(pos)
     r_hat = pos / l
@@ -180,12 +171,9 @@ def simulate(cfg, env, params, t_end, dt=0.05, elev0_deg=30.0, warmup=5.0):
     histories plus summary totals (energy, water, stall/crash flags).
     """
     elev0 = np.radians(elev0_deg)
-    # Start on the reference path itself, heading along its tangent there,
-    # rather than a fixed heading unrelated to the commanded flight-path
-    # shape. Starting off the path (or worse, with a heading exactly
-    # radial to the turn-force geometry) is a near-singular initial
-    # condition the guidance loop then has to fight its way out of before
-    # it can do anything useful.
+    # Start the kite on the reference path, heading along its tangent
+    # there, so the guidance loop begins close to where it wants to be
+    # instead of having to correct a large initial error first.
     ds = 1e-4
     p0 = reference_point(0.0, params, elev0, cfg.tether_len)
     p1 = reference_point(ds, params, elev0, cfg.tether_len)
@@ -347,14 +335,7 @@ class OptimizationResult:
         # ── Flight path in 3D (X=downwind, Y=crosswind, Z=altitude) ──
         ax1 = fig.add_subplot(gs[:, 0], projection="3d")
         x, y, z = best["pos"][:, 0], best["pos"][:, 1], best["pos"][:, 2]
-        points = np.array([x, y, z]).T.reshape(-1, 1, 3)
-        segments = np.concatenate([points[:-1], points[1:]], axis=1)
-        power_W = best["P"][:-1]
-        lc = Line3DCollection(segments, cmap="plasma",
-                               norm=plt.Normalize(power_W.min(), power_W.max()))
-        lc.set_array(power_W)
-        lc.set_linewidth(2.5)
-        ax1.add_collection3d(lc)
+        ax1.plot(x, y, z, color="#f0a020", linewidth=1.8)
         ax1.set_xlim(x.min() - 20, x.max() + 20)
         ax1.set_ylim(y.min() - 20, y.max() + 20)
         ax1.set_zlim(0, z.max() + 30)
@@ -366,9 +347,6 @@ class OptimizationResult:
         # anchor point for reference
         ax1.scatter([0], [0], [0], color="black", s=25, marker="^")
         ax1.text(0, 0, 15, "anchor", fontsize=7)
-        cb = fig.colorbar(lc, ax=ax1, fraction=0.046, pad=0.1,
-                           orientation="horizontal", location="top")
-        cb.set_label("Instantaneous power (W)")
 
         # ── Power vs time (optimal vs baseline) ───────────────────
         ax2 = fig.add_subplot(gs[0, 1])
@@ -455,31 +433,22 @@ def optimize_route(cfg, env, opt_t_end=50.0, report_t_end=90.0, opt_dt=0.15,
         print("Searching for the optimal steering pattern "
               f"(this simulates ~{opt_t_end:.0f}s of flight per candidate)...")
 
-    # Stage 1: differential evolution for a global search. polish=False
-    # so the gradient refinement below is an explicit, separately-
-    # reported stage rather than a hidden step inside scipy's call.
+    # differential_evolution is a global optimizer: it tries a whole
+    # population of candidate [az_amp, f, phi, elev_amp, gen_load]
+    # vectors, keeps mixing/mutating the best ones, and doesn't need a
+    # starting guess or a gradient -- useful here since _objective
+    # (run a physics sim, read off the average power) has no clean
+    # derivative to hand a gradient-based optimizer.
     args = (cfg, env, opt_t_end, opt_dt, elev0_deg, warmup, tension_cap)
     res = differential_evolution(
         _objective, PARAM_BOUNDS, args=args,
         seed=seed, maxiter=maxiter, popsize=popsize,
-        mutation=(0.4, 1.2), recombination=0.7, tol=1e-3, polish=False,
+        mutation=(0.4, 1.2), recombination=0.7, tol=1e-3,
     )
-    global_kw = -res.fun / 1000.0
-
-    # Stage 2: local gradient-based refinement (finite-difference
-    # gradient, L-BFGS-B) starting from the global search's winner.
-    polish_res = minimize(_objective, res.x, args=args, method="L-BFGS-B",
-                           bounds=PARAM_BOUNDS)
-    if polish_res.fun < res.fun:
-        best_params = polish_res.x
-        polish_kw = -polish_res.fun / 1000.0
-    else:
-        best_params = res.x
-        polish_kw = global_kw
+    best_params = res.x
 
     if verbose:
-        print(f"Done. Global search: {global_kw:.2f} kW -> "
-              f"gradient refine: {polish_kw:.2f} kW "
+        print(f"Done. Best found: {-res.fun/1000.0:.2f} kW "
               f"(re-simulating over {report_t_end:.0f}s for the report)")
 
     best_sim = simulate(cfg, env, best_params, report_t_end, report_dt,
