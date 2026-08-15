@@ -32,6 +32,8 @@ Steering is a single control input (differential brake/line deflection) that pro
 
 ## How it works
 
+All code lives in [`codestack/`](codestack/).
+
 **`kite_dynamics.py`**: the 6DOF physics engine described above, plus the wind/atmosphere model.
 
 **`kite_flygen.py`**: Fly-Gen architecture -- guidance, steering control, and simulation on a fixed tether. Running it directly flies a reasonable, un-optimized figure-8.
@@ -45,30 +47,6 @@ Steering is a single control input (differential brake/line deflection) that pro
 **`kite_compare.py`**: runs all three strategies (standard figure-8, physics-optimal Ground-Gen, Fly-Gen) for a given site and produces a written report and comparison plot.
 
 **`kite_animate.py`**: renders a flight as a live 3D GIF -- flight path, a glowing marker/trail colored by instantaneous power, and a live power-vs-time readout. `--compare` runs all three `kite_compare.py` strategies together on one animated plot (that's the README hero image); without it, animates a single `--arch`.
-
-## Usage
-
-```bash
-pip install -r requirements.txt
-
-# Fly the default (un-optimized) figure-8 for each architecture
-python kite_flygen.py
-python kite_groundgen.py
-
-# Render a live animated GIF -- all three strategies together, or just one
-python kite_animate.py --compare --preset atacama_coast
-python kite_animate.py --arch groundgen
-python kite_animate.py --arch flygen --optimize
-
-# Search for the optimal flight pattern for one architecture
-python kite_path_optimizer.py --arch flygen --wind-speed 12
-python kite_path_optimizer.py --arch groundgen --wind-speed 12
-
-# Three-way comparison, with a written report and plot
-python kite_compare.py --preset atacama_coast
-```
-
-Each candidate the optimizer evaluates is a full RK4 simulation, not a cheap closed-form evaluation, so search cost scales with `--maxiter` x `--popsize`. The defaults are kept modest so a run finishes in a couple of minutes; raise them for a more thorough search.
 
 ## Validation
 
