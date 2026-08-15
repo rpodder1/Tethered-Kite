@@ -2,20 +2,22 @@
 kite_compare.py
 
 Compares three airborne wind energy flight strategies for the same
-kite, weather, and location:
+kite, weather, and location, all built on the same full 6DOF rigid-
+body dynamics (kite_dynamics.py):
 
-  1. Standard ascending figure-8 - the simple, symmetric weave shape
-     most commercial pumping-cycle systems standardize on. Only winch
-     settings (reel-out/reel-in speed, depower) are tuned to the site.
+  1. Standard figure-8 (Ground-Gen) - kite_groundgen.py's un-optimized
+     DEFAULT_PARAMS: a gentle, reasonable pumping cycle, flown as-is.
 
-  2. Fly-Gen (onboard generator) - fixed-length tether, no winch;
+  2. Physics-optimal (Ground-Gen) - kite_path_optimizer.py searches
+     winch settings and flight-path shape together to find whatever
+     maximizes net average power for the same pumping-cycle
+     architecture.
+
+  3. Fly-Gen (onboard generator) - fixed-length tether, no winch;
      onboard rotors extract power via added drag while the kite flies
-     a continuous crosswind weave (historically Makani). Uses the
-     full dynamic simulation from kite_dynamics.py, not the
-     quasi-steady approximation the other two use.
-
-  3. Physics-optimal pumping cycle - weave shape and winch settings
-     are searched together to find whatever maximizes energy.
+     a continuous crosswind weave. kite_path_optimizer.py searches its
+     flight-path shape and generator loading. Historically Makani's
+     architecture.
 
 Usage (interactive - prompts you for weather/location/kite):
     python kite_compare.py
@@ -33,11 +35,11 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
-from matplotlib.lines import Line2D
 
 from kite_dynamics import KiteConfig
-from kite_optimizer import WindEnvironment, optimize_route
-from kite_pumping import optimize_fixed_figure8, optimize_physics_optimal
+import kite_flygen
+import kite_groundgen
+from kite_path_optimizer import maximize_energy
 from kite_environments import LOCATION_PRESETS, build_environment, prompt_for_scenario
 
 
@@ -51,63 +53,73 @@ COLOR_REEL_IN = "#555555"   # generic "reel-in" phase shade
 #  Comparison driver
 # ─────────────────────────────────────────────
 
-def run_comparison(cfg, env, l_min=300.0, l_max=650.0, elev0_deg=28.0,
-                    flygen_tether_len=800.0, flygen_elev0_deg=30.0,
-                    report_cycles=3, seed=0, verbose=True):
+def run_comparison(cfg, env, l_min=300.0, l_max=650.0, elev0_deg=30.0,
+                    n_cycles=2, flygen_tether_len=650.0, flygen_duration=300.0,
+                    seed=0, maxiter=8, popsize=8, verbose=True):
     if verbose:
         print("=" * 60)
-        print("STEP 1/3 - Standard ascending figure-8 (winch settings only)")
+        print("STEP 1/3 - Standard figure-8 (un-optimized ground-gen)")
         print("=" * 60)
-    fixed_params, fixed_sim, _ = optimize_fixed_figure8(
-        cfg, env, l_min=l_min, l_max=l_max, elev0_deg=elev0_deg,
-        report_cycles=report_cycles, seed=seed, verbose=verbose)
-
+    fixed_sim = kite_groundgen.simulate(
+        kite_groundgen.DEFAULT_PARAMS, cfg, env, l_min=l_min, l_max=l_max,
+        elev0_deg=elev0_deg, n_cycles=n_cycles)
     if verbose:
-        print()
-        print("=" * 60)
-        print("STEP 2/3 - Physics-optimal pumping cycle (free-form shape + winch)")
-        print("=" * 60)
-    optimal_params, optimal_sim, _ = optimize_physics_optimal(
-        cfg, env, l_min=l_min, l_max=l_max, elev0_deg=elev0_deg,
-        report_cycles=report_cycles, seed=seed, verbose=verbose)
+        print(f"Done. {fixed_sim['mean_power']/1000:.2f} kW average.")
 
-    # Match Fly-Gen's simulated window to the pumping cycle's natural
-    # duration so all three are compared over identical wall-clock time.
+    # Match Fly-Gen's (and the optimal ground-gen re-sim below) window to
+    # the standard-figure-8 run's natural duration so all three are
+    # compared over identical wall-clock time.
     match_duration = fixed_sim["t"][-1]
 
     if verbose:
         print()
         print("=" * 60)
-        print(f"STEP 3/3 - Fly-Gen (onboard generator, fixed tether, full dynamics)")
+        print("STEP 2/3 - Physics-optimal ground-gen (search winch + shape)")
+        print("=" * 60)
+    gg_args = (cfg, env, l_min, l_max, elev0_deg, n_cycles)
+    optimal_params, optimal_sim, _ = maximize_energy(
+        kite_groundgen.simulate, kite_groundgen.PARAM_BOUNDS, gg_args,
+        seed=seed, maxiter=maxiter, popsize=popsize,
+        seed_params=kite_groundgen.DEFAULT_PARAMS, verbose=verbose,
+        label="ground-gen pumping cycle")
+
+    # The search picks winch speeds freely, so optimal_sim's own cycle
+    # duration is generally different from fixed_sim's -- comparing raw
+    # total energy across two different elapsed times isn't a fair
+    # comparison (a strategy that finishes its cycle in half the time
+    # will show less total energy even if its average power is much
+    # higher). Since kite_groundgen resets to identical state at the
+    # start of every cycle, mean_power is duration-independent, so
+    # re-simulating with enough cycles to fill roughly the same window
+    # as the other two strategies makes the totals -- and the plots --
+    # actually comparable, not just a rescaled estimate.
+    single_cycle_duration = optimal_sim["t"][-1] / n_cycles
+    report_cycles = max(n_cycles, round(match_duration / single_cycle_duration))
+    if report_cycles != n_cycles:
+        optimal_sim = kite_groundgen.simulate(
+            optimal_params, cfg, env, l_min=l_min, l_max=l_max,
+            elev0_deg=elev0_deg, n_cycles=report_cycles)
+
+    if verbose:
+        print()
+        print("=" * 60)
+        print(f"STEP 3/3 - Fly-Gen (onboard generator, fixed tether, full 6DOF)")
         print(f"  (matched to the same {match_duration:.0f}s window)")
         print("=" * 60)
     flygen_cfg = KiteConfig(mass=cfg.mass, area=cfg.area, CL=cfg.CL, CD=cfg.CD,
                              tether_len=flygen_tether_len,
                              site_elevation_msl=cfg.site_elevation_msl)
-    flygen_result = optimize_route(flygen_cfg, env, report_t_end=match_duration,
-                                    elev0_deg=flygen_elev0_deg, seed=seed,
-                                    verbose=verbose)
-    flygen_sim = _normalize_flygen_sim(flygen_result.best)
+    fg_args = (flygen_cfg, env, match_duration)
+    flygen_params, flygen_sim, _ = maximize_energy(
+        kite_flygen.simulate, kite_flygen.PARAM_BOUNDS, fg_args,
+        seed=seed, maxiter=maxiter, popsize=popsize,
+        seed_params=kite_flygen.DEFAULT_PARAMS, verbose=verbose,
+        label="Fly-Gen figure-8")
 
-    return dict(fixed=(fixed_params, fixed_sim),
+    return dict(fixed=(kite_groundgen.DEFAULT_PARAMS, fixed_sim),
                 optimal=(optimal_params, optimal_sim),
-                flygen=(flygen_result.best_params, flygen_sim),
+                flygen=(flygen_params, flygen_sim),
                 match_duration=match_duration)
-
-
-def _normalize_flygen_sim(sim):
-    """
-    Fly-Gen's sim dict (from kite_optimizer.py) has slightly different
-    keys than the pumping-cycle sim dicts (no 'phase' or 'l', since
-    it's a continuous weave on a fixed tether, not a reel-out/reel-in
-    cycle). Add the missing keys so downstream plotting/report code
-    can treat all three uniformly.
-    """
-    sim = dict(sim)  # shallow copy, don't mutate the original
-    sim["phase"] = np.array(["out"] * len(sim["t"]))   # continuously "generating"
-    sim["l"] = np.linalg.norm(sim["pos"], axis=1)
-    sim["shape_loss"] = 0.0   # not a meaningful concept for Fly-Gen
-    return sim
 
 
 # ─────────────────────────────────────────────
@@ -144,20 +156,23 @@ def print_report(cfg, env, results, scenario_label=""):
           f"{flygen_sim['peak_tension']/1000:15.2f}{optimal_sim['peak_tension']/1000:17.2f}")
     print()
 
-    ro, ri, dp, nw, az, el = fixed_params
-    print(f"Standard figure-8:   {nw:.1f} weaves/stroke, az=±{az:.0f}°, elev=±{el:.0f}° "
-          f"(fixed shape); reel-out {ro:.2f} m/s, reel-in {ri:.2f} m/s, depower {dp*100:.0f}%")
-    ro2, ri2, dp2, nw2, az2, el2 = optimal_params
-    print(f"Physics-optimal:     {nw2:.1f} weaves/stroke, az=±{az2:.0f}°, elev=±{el2:.0f}° "
-          f"(found by search); reel-out {ro2:.2f} m/s, reel-in {ri2:.2f} m/s, depower {dp2*100:.0f}%")
-    az_amp, f, phi, elev_amp, gen_load = flygen_params
-    print(f"Fly-Gen:             figure-8 az=±{np.degrees(az_amp):.0f}°, "
-          f"elev=±{np.degrees(elev_amp):.0f}° @ {f:.3f} Hz (pursuit-guidance "
-          f"tracked); generator load {gen_load*100:.0f}% "
+    ro, ri, dp, az, f, el = fixed_params
+    print(f"Standard figure-8:   az=±{np.degrees(az):.0f}°, elev=±{np.degrees(el):.0f}° "
+          f"@ {f:.4f} Hz (un-optimized); reel-out {ro:.2f} m/s, reel-in {ri:.2f} m/s, "
+          f"depower {dp*100:.0f}%")
+    ro2, ri2, dp2, az2, f2, el2 = optimal_params
+    print(f"Physics-optimal:     az=±{np.degrees(az2):.0f}°, elev=±{np.degrees(el2):.0f}° "
+          f"@ {f2:.4f} Hz (found by search); reel-out {ro2:.2f} m/s, reel-in {ri2:.2f} m/s, "
+          f"depower {dp2*100:.0f}%")
+    az3, f3, phi3, el3, gl3 = flygen_params
+    print(f"Fly-Gen:             az=±{np.degrees(az3):.0f}°, elev=±{np.degrees(el3):.0f}° "
+          f"@ {f3:.4f} Hz (found by search); generator load {gl3*100:.0f}% "
           f"(fixed tether {flygen_sim['l'][0]:.0f}m)")
-    if flygen_sim.get("crashed") or flygen_sim.get("stalled"):
-        print("  ** WARNING: Fly-Gen trajectory crashed or stalled during the "
-              "simulated window -- its numbers above are not a sustained-flight result.")
+    for name, sim in [("Standard figure-8", fixed_sim), ("Physics-optimal", optimal_sim),
+                       ("Fly-Gen", flygen_sim)]:
+        if sim.get("crashed") or sim.get("stalled"):
+            print(f"  ** WARNING: {name} crashed or stalled during the simulated "
+                  f"window -- its numbers are not a sustained-flight result.")
     print()
 
     entries = [("Standard figure-8", fixed_Wh), ("Fly-Gen", flygen_Wh),
@@ -168,12 +183,10 @@ def print_report(cfg, env, results, scenario_label=""):
           f"({winner_wh:.1f} Wh, {(winner_wh/max(runner_up_wh,1e-9)-1)*100:+.0f}% "
           f"vs. the next best)")
     print()
-    print("Notes on comparability: the two pumping-cycle strategies (Standard")
-    print("figure-8, Physics-optimal) use a quasi-steady approximation, the same")
-    print("kind used in early-stage AWE feasibility studies. Fly-Gen uses the full")
-    print("dynamic simulation instead (real steering physics, RK4 integration).")
-    print("The comparison is fair in energy/power/tension terms, but keep in mind")
-    print("the two modeling approaches have different fidelity trade-offs.")
+    print("All three strategies share the same full 6DOF rigid-body dynamics")
+    print("(kite_dynamics.py) and cascaded guidance/attitude controller. The two")
+    print("ground-gen strategies additionally use a quasi-steady closed-form model")
+    print("(Loyd, 1980) for the retraction phase only -- see kite_groundgen.py.")
     print("=" * 72)
 
 
@@ -211,7 +224,7 @@ def plot_comparison(cfg, env, results, scenario_label="",
         pts = np.array([x, y, z]).T.reshape(-1, 1, 3)
         segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
         colors = [color if is_out[i] else COLOR_REEL_IN for i in range(len(segs))]
-        lc = Line3DCollection(segs, colors=colors, linewidth=2.0)
+        lc = Line3DCollection(segs, colors=colors, linewidth=1.6)
         ax.add_collection3d(lc)
         ax.set_xlim(x.min()-20, x.max()+20)
         ax.set_ylim(y.min()-20, y.max()+20)
@@ -231,7 +244,7 @@ def plot_comparison(cfg, env, results, scenario_label="",
     # ── Panel 4: Power vs time (spans full width, row 2) ──────
     ax4 = fig.add_subplot(gs[1, :])
     for name, sim, color, wh in strategies:
-        ax4.plot(sim["t"], sim["P"]/1000, color=color, linewidth=1.5, label=name)
+        ax4.plot(sim["t"], sim["P"]/1000, color=color, linewidth=1.2, label=name)
     ax4.axhline(0, color="black", linewidth=0.6)
     ax4.set_xlabel("Time (s)")
     ax4.set_ylabel("Power (kW)")
@@ -259,7 +272,10 @@ def plot_comparison(cfg, env, results, scenario_label="",
         cum = np.concatenate([[0], np.cumsum(
             0.5*(sim["P"][1:]+sim["P"][:-1])*np.diff(sim["t"]))]) / 3600.0
         ax6.fill_between(sim["t"], cum, color=color, alpha=0.15)
-        ax6.plot(sim["t"], cum, color=color, linewidth=2, label=f"{name} - {cum[-1]:.2f} Wh")
+        # Label with sim["energy_J"] (== wh), not cum[-1]: Fly-Gen's
+        # energy_J excludes an internal warmup window that this raw
+        # cumulative trace doesn't, so they can differ by a few percent.
+        ax6.plot(sim["t"], cum, color=color, linewidth=2, label=f"{name} - {wh:.2f} Wh")
     ax6.set_xlabel("Time (s)")
     ax6.set_ylabel("Cumulative energy (Wh)")
     ax6.set_title("Cumulative energy (same time window)", fontsize=11, fontweight="bold")
@@ -287,16 +303,19 @@ def _parse_args():
                     help="wind shear exponent")
     p.add_argument("--site-elevation", type=float, default=None,
                     help="site elevation above sea level (m)")
-    p.add_argument("--lwc", type=float, default=None,
-                    help="fog liquid water content (kg/m^3)")
     p.add_argument("--mass", type=float, default=50.0)
     p.add_argument("--area", type=float, default=20.0)
     p.add_argument("--cl", type=float, default=1.0)
     p.add_argument("--cd", type=float, default=0.15)
     p.add_argument("--l-min", type=float, default=300.0)
     p.add_argument("--l-max", type=float, default=650.0)
-    p.add_argument("--cycles", type=int, default=3)
+    p.add_argument("--cycles", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
+    # Two full RK4 searches (ground-gen + Fly-Gen) -- keep the default
+    # budget small so a CLI run finishes in a couple of minutes. Raise
+    # for a more thorough (proportionally slower) search.
+    p.add_argument("--maxiter", type=int, default=3)
+    p.add_argument("--popsize", type=int, default=4)
     p.add_argument("--output", type=str, default="kite_compare.png")
     p.add_argument("--non-interactive", action="store_true",
                     help="never prompt; use flags/defaults only")
@@ -307,8 +326,8 @@ def main():
     args = _parse_args()
 
     any_manual_flag = any(v is not None for v in
-                           [args.wind_speed, args.shear, args.site_elevation,
-                            args.lwc]) or args.preset is not None
+                           [args.wind_speed, args.shear, args.site_elevation]
+                           ) or args.preset is not None
 
     if not any_manual_flag and not args.non_interactive and sys.stdin.isatty():
         cfg, env, scenario_label = prompt_for_scenario()
@@ -320,8 +339,6 @@ def main():
             overrides["shear_exp"] = args.shear
         if args.site_elevation is not None:
             overrides["site_elevation_msl"] = args.site_elevation
-        if args.lwc is not None:
-            overrides["lwc"] = args.lwc
 
         env, site_elevation_msl = build_environment(args.preset, **overrides)
         cfg = KiteConfig(mass=args.mass, area=args.area, CL=args.cl, CD=args.cd,
@@ -330,7 +347,8 @@ def main():
                            if args.preset else "Custom (CLI flags)")
 
     results = run_comparison(cfg, env, l_min=args.l_min, l_max=args.l_max,
-                              report_cycles=args.cycles, seed=args.seed)
+                              n_cycles=args.cycles, seed=args.seed,
+                              maxiter=args.maxiter, popsize=args.popsize)
 
     print_report(cfg, env, results, scenario_label)
     out_path = plot_comparison(cfg, env, results, scenario_label, path=args.output)

@@ -6,8 +6,7 @@ objects the simulation needs. Provides a few named location presets
 plus an interactive prompt for entering conditions by hand.
 """
 
-from kite_dynamics import KiteConfig
-from kite_optimizer import WindEnvironment
+from kite_dynamics import KiteConfig, WindEnvironment
 
 
 # ─────────────────────────────────────────────
@@ -17,34 +16,28 @@ from kite_optimizer import WindEnvironment
 # weather feed, just reasonable starting points you can override.
 LOCATION_PRESETS = {
     "atacama_coast": dict(
-        label="Atacama coast, Chile (steady trade winds + camanchaca fog)",
+        label="Atacama coast, Chile (steady trade winds)",
         wind_speed_ref=12.0, shear_exp=0.14, site_elevation_msl=500.0,
-        lwc=0.2e-3,
     ),
     "north_sea_offshore": dict(
         label="North Sea, offshore (strong, low-shear marine wind)",
         wind_speed_ref=10.5, shear_exp=0.10, site_elevation_msl=0.0,
-        lwc=0.0,
     ),
     "patagonia_ridge": dict(
         label="Patagonia ridge, Argentina/Chile (very strong ridge wind)",
         wind_speed_ref=17.0, shear_exp=0.12, site_elevation_msl=250.0,
-        lwc=0.0,
     ),
     "great_plains_us": dict(
         label="Great Plains, USA (moderate wind, rougher terrain)",
         wind_speed_ref=9.0, shear_exp=0.20, site_elevation_msl=700.0,
-        lwc=0.0,
     ),
     "andes_highland": dict(
         label="High Andes plateau (thin air, strong daytime wind)",
         wind_speed_ref=11.0, shear_exp=0.16, site_elevation_msl=3800.0,
-        lwc=0.0,
     ),
     "north_sea_calm": dict(
         label="North Sea, a calmer day (below-average wind)",
         wind_speed_ref=6.5, shear_exp=0.12, site_elevation_msl=0.0,
-        lwc=0.0,
     ),
 }
 
@@ -63,13 +56,12 @@ def build_environment(preset_key=None, **overrides):
         params.pop("label", None)
     else:
         params = dict(wind_speed_ref=12.0, shear_exp=0.14,
-                      site_elevation_msl=0.0, lwc=0.0)
+                      site_elevation_msl=0.0)
 
     params.update(overrides)
     site_elevation_msl = params.pop("site_elevation_msl")
     env = WindEnvironment(wind_speed_ref=params["wind_speed_ref"],
-                           shear_exp=params["shear_exp"],
-                           lwc=params["lwc"])
+                           shear_exp=params["shear_exp"])
     return env, site_elevation_msl
 
 
@@ -118,7 +110,6 @@ def prompt_for_scenario():
         wind_speed_ref = _prompt_float("Wind speed at 10m reference height (m/s)", 12.0)
         shear_exp = _prompt_float("Wind shear exponent (0.10 open/flat .. 0.25 rough terrain)", 0.14)
         site_elevation_msl = _prompt_float("Site elevation above sea level (m)", 0.0)
-        lwc = _prompt_float("Fog liquid water content (kg/m^3, 0 = no fog)", 0.0)
         label = "Custom site"
     else:
         key = keys[idx]
@@ -128,10 +119,8 @@ def prompt_for_scenario():
         wind_speed_ref = preset["wind_speed_ref"]
         shear_exp = preset["shear_exp"]
         site_elevation_msl = preset["site_elevation_msl"]
-        lwc = preset["lwc"]
 
-    env = WindEnvironment(wind_speed_ref=wind_speed_ref, shear_exp=shear_exp,
-                           lwc=lwc)
+    env = WindEnvironment(wind_speed_ref=wind_speed_ref, shear_exp=shear_exp)
 
     print()
     print("=" * 60)

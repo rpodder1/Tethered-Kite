@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# Generated plots from running the scripts -- kite_compare_example.png
+# (the one used in the README) is intentionally kept out of this list.
+kite_flygen.png
+kite_flygen_optimal.png
+kite_groundgen.png
+kite_groundgen_optimal.png
+kite_route.png
+kite_compare.png
+test_free_flight.png
